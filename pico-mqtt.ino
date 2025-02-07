@@ -1,10 +1,12 @@
+#include <ArduinoJson.h>
+#include <ArduinoJson.hpp>
+
 #include "arduino_secrets.h"
 #include "local_config.h"
 
 #include <MQTT.h>
 #include <MQTTClient.h>
 #include <WiFi.h>
-#include <Arduino_JSON.h>
 
 #define DECODE_NEC
 #define DECODE_SAMSUNG
@@ -14,10 +16,13 @@
 #define DECODE_RC6A
 #define EXCLUDE_UNIVERSAL_PROTOCOLS
 #define EXCLUDE_EXOTIC_PROTOCOLS
+#define IR_SEND_PIN 3
+#define IR_RECEIVE_PIN 28
 // defines MUST come before include
 #include <IRremote.hpp>
 
-const int irRxPin = IR_RX_PIN;
+const int irSendPin = IR_SEND_PIN;
+const int irReceivePin = IR_RECEIVE_PIN;
 const decode_type_t relayIrProtocol = NEC;
 const uint16_t relayIrAddr = 0x00;
 const uint16_t relayIrOnCmd = 0x40;
@@ -38,6 +43,7 @@ const char* topicRelayStatus = TOPIC_RELAY_STATUS;
 const char* topicIpAddrStatus = TOPIC_IP_ADDRESS;
 const char* topicUptimeStatus = TOPIC_UPTIME;
 const char* topicIrRx = TOPIC_IR_RX;
+const char* topicIrSend = TOPIC_IR_SEND;
 
 WiFiClient net;
 MQTTClient mqttClient;
@@ -63,44 +69,63 @@ void mqttConnect() {
 
 void mqttMsgReceived(String& topic, String& payload) {
   Serial1.println(topic + ": " + payload);
+
   if (topic == topicRelayControl) {
     if (payload == "ON") {
       relayOn();
     } else if (payload == "OFF") {
       relayOff();
     }
+  } else if (topic == topicIrSend) {
+    sendIr(payload);
   }
 }
 
-void printMacAddress(byte mac[]) {
-  for (int i = 5; i >= 0; i--) {
-    if (mac[i] < 16) {
-      Serial1.print("0");
-    }
-    Serial1.print(mac[i], HEX);
-    if (i > 0) {
-      Serial1.print(":");
-    }
+void sendIr(String payload) {
+  JsonDocument irMessage;
+  DeserializationError error = deserializeJson(irMessage, payload);
+
+  if (error) {
+    Serial1.print("deserializeJson() failed: ");
+    Serial1.println(error.c_str());
+    return;
   }
-  Serial1.println();
-}
 
-void printIpConfig() {
-  ipAddr = WiFi.localIP();
-  Serial1.print("IP address: ");
-  Serial1.println(ipAddr);
+  const char* protocol = irMessage["protocol"];   // "Samsung"
+  const uint16_t address = irMessage["address"];  // 7
+  const uint16_t command = irMessage["command"];  // 15
 
-  // Serial1.print("Subnet mask: ");
-  // Serial1.println((IPAddress)WiFi.subnetMask());
+  if (protocol == nullptr) {
+    Serial.println("irMessage payload missing protocol");
+    return;
+  }
 
-  // Serial1.print("Gateway IP: ");
-  // Serial1.println((IPAddress)WiFi.gatewayIP());
+  Serial1.print("IR sending protocol ");
+  Serial1.print(protocol);
+  Serial1.print(" address ");
+  Serial1.print(address);
+  Serial1.print(" command ");
+  Serial1.println(command);
 
-  // print your MAC address:
-  // byte mac[6];
-  // WiFi.macAddress(mac);
-  // Serial1.print("MAC address: ");
-  // printMacAddress(mac);
+  if (strcmp(protocol, "Samsung") == 0) {
+    IrSender.sendSamsung(address, command, 1);
+
+  } else if (strcmp(protocol, "NEC") == 0) {
+    IrSender.sendNEC(address, command, 1);
+
+  } else if (strcmp(protocol, "RC5") == 0) {
+    IrSender.sendRC5(address, command, 1);
+
+  } else if (strcmp(protocol, "RC6") == 0) {
+    IrSender.sendRC6(address, command, 1);
+
+  } else if (strcmp(protocol, "RC6A") == 0) {
+    IrSender.sendRC6A(address, command, 1, 0);
+
+  } else {
+    Serial1.print(protocol);
+    Serial1.println(" not handled");
+  }
 }
 
 void wifiConnect() {
@@ -108,17 +133,22 @@ void wifiConnect() {
   Serial1.println();
   Serial1.print("WiFi connecting to ");
   Serial1.print(ssid);
-  Serial1.print("..");
   while (WiFi.status() != WL_CONNECTED) {
+    digitalWrite(LED_BUILTIN, HIGH);
     Serial1.print(".");
     WiFi.begin(ssid, password);
-    delay(1000);
+    delay(500);
+    digitalWrite(LED_BUILTIN, LOW);
   }
   Serial1.println("connected");
-  printIpConfig();
+  Serial1.print("IP address: ");
+  ipAddr = WiFi.localIP();
+  Serial1.println(ipAddr.toString());
 }
 
 void setup() {
+  pinMode(LED_BUILTIN, OUTPUT);
+
   // Serial1 is the first UART, not USB
   Serial1.begin(115200);
   delay(100);
@@ -129,9 +159,15 @@ void setup() {
   Serial1.println(RELAY_PIN);
   pinMode(relayPin, OUTPUT);
 
-  Serial1.print(F("IR RX pin: "));
-  Serial1.println(irRxPin);
-  IrReceiver.begin(irRxPin, ENABLE_LED_FEEDBACK, USE_DEFAULT_FEEDBACK_LED_PIN);
+  Serial1.print(F("IR Send pin: "));
+  Serial1.println(irSendPin);
+  pinMode(irSendPin, OUTPUT);
+  IrSender.begin();
+  // IrSender.enableIROut(38);
+
+  Serial1.print(F("IR Receive pin: "));
+  Serial1.println(irReceivePin);
+  IrReceiver.begin(irReceivePin, ENABLE_LED_FEEDBACK, USE_DEFAULT_FEEDBACK_LED_PIN);
 
   Serial1.print(F("IR protocols: "));
   printActiveIRProtocols(&Serial1);
@@ -158,12 +194,14 @@ void relayOff() {
 }
 
 void publishIrData() {
-  JSONVar irPayload;
+  JsonDocument irPayload;
   irPayload["protocol"] = getProtocolString(IrReceiver.decodedIRData.protocol);
   irPayload["address"] = IrReceiver.decodedIRData.address;
   irPayload["command"] = IrReceiver.decodedIRData.command;
 
-  mqttClient.publish(topicIrRx, JSON.stringify(irPayload));
+  String payload;
+  serializeJson(irPayload, payload);
+  mqttClient.publish(topicIrRx, payload);
 }
 
 void loop() {
@@ -177,7 +215,7 @@ void loop() {
 
     // check for specific relay protocol/address/command
     if (IrReceiver.decodedIRData.protocol == relayIrProtocol) {
-      if (IrReceiver.decodedIRData.address == relayIrAddr ) {
+      if (IrReceiver.decodedIRData.address == relayIrAddr) {
         if (IrReceiver.decodedIRData.command == relayIrOnCmd) {
           relayOn();
         } else if (IrReceiver.decodedIRData.command == relayIrOffCmd) {
