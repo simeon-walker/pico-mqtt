@@ -134,17 +134,19 @@ void sendIr(String payload) {
 
 void wifiConnect() {
   // Begin WiFi connection
-  Serial1.println();
   Serial1.print("WiFi connecting to ");
   Serial1.print(ssid);
-  while (WiFi.status() != WL_CONNECTED) {
+  Serial1.print("..");
+
+  do {
     digitalWrite(LED_BUILTIN, HIGH);
     Serial1.print(".");
     WiFi.begin(ssid, password);
     delay(500);
     digitalWrite(LED_BUILTIN, LOW);
     delay(500);
-  }
+  } while (WiFi.status() != WL_CONNECTED);
+
   Serial1.println("connected");
   Serial1.print("IP address: ");
   ipAddr = WiFi.localIP();
@@ -172,6 +174,7 @@ void setup() {
   Serial1.println(IR_RECEIVE_PIN);
   Serial1.print("IR protocols: ");
   printActiveIRProtocols(&Serial1);
+  Serial1.println();
 
   wifiConnect();
 
@@ -182,12 +185,12 @@ void setup() {
 
 void relayOn() {
   digitalWrite(RELAY_PIN, HIGH);
-  mqttClient.publish(topicStatus, "{\"relay\": \"on\"}");
+  publishStatus();
 }
 
 void relayOff() {
   digitalWrite(RELAY_PIN, LOW);
-  mqttClient.publish(topicStatus, "{\"relay\": \"off\"}");
+  publishStatus();
 }
 
 void publishIrData() {
@@ -201,9 +204,15 @@ void publishIrData() {
   mqttClient.publish(topicIrReceive, payload);
 }
 
-void publishUptime(unsigned short mins) {
+void publishStatus() {
   JsonDocument status;
-  status["uptime"] = mins;
+  status["uptime"] = minutes;
+
+  if (digitalRead(RELAY_PIN) == true) {
+    status["relay"] = "on";
+  } else {
+    status["relay"] = "off";
+  }
 
   String statusPayload;
   serializeJson(status, statusPayload);
@@ -246,8 +255,7 @@ void loop() {
   if (millis() - lastMillis > 60000) {
     lastMillis = millis();
     minutes = lastMillis / 60000;
-    publishUptime(minutes);
+    publishStatus();
   }
-
   delay(100);
 }
